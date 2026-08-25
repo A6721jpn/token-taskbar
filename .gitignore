@@ -1,0 +1,23 @@
+# Local Codex state and credentials
+.codex/
+auth.json
+logs_1.sqlite*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Local logs and temporary files
+*.log
+*.tmp
+
+# Editor and Windows metadata
+.idea/
+.vscode/
+Desktop.ini
+Thumbs.db
