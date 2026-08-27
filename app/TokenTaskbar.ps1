@@ -1,6 +1,6 @@
 param(
     [string]$CodexRoot = (Join-Path $env:USERPROFILE ".codex"),
-    [string]$PythonExe = "python",
+    [string]$PythonExe = "",
     [int]$RefreshIntervalSeconds = 60,
     [switch]$RunOnce
 )
@@ -34,6 +34,137 @@ $Script:State = [ordered]@{
     LastLogStamp    = $null
     LastRenderKey   = $null
     LastReaderFetchAt = $null
+    PythonPath      = $null
+}
+
+function Resolve-ApplicationPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName
+    )
+
+    if (Test-Path -LiteralPath $CommandName -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $CommandName).Path
+    }
+
+    $command = Get-Command $CommandName -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $command) {
+        return $null
+    }
+
+    return $command.Source
+}
+
+function Test-PythonInterpreter {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $probeToken = "CODEX_TOKEN_TASKBAR_PYTHON_OK"
+    $probeCode = "import json, sqlite3, urllib.request; print('$probeToken')"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $probeOutput = @(& $Path -X utf8 -c $probeCode 2>&1)
+        $probeExitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Usable = $false
+            Clean = $false
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $probeLines = @(
+        $probeOutput |
+            ForEach-Object { [string]$_ } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+
+    return [pscustomobject]@{
+        Usable = (
+            $probeExitCode -eq 0 -and
+            $probeLines.Count -gt 0 -and
+            $probeLines[-1].Trim() -eq $probeToken
+        )
+        Clean = ($probeLines.Count -eq 1 -and $probeLines[0].Trim() -eq $probeToken)
+    }
+}
+
+function Resolve-PythonInterpreter {
+    if (-not [string]::IsNullOrWhiteSpace($PythonExe)) {
+        $explicitPath = Resolve-ApplicationPath -CommandName $PythonExe
+        if (-not $explicitPath) {
+            throw "Configured Python executable was not found: $PythonExe"
+        }
+
+        $probe = Test-PythonInterpreter -Path $explicitPath
+        if (-not $probe.Usable) {
+            throw "Configured Python executable cannot load the required standard libraries: $explicitPath"
+        }
+
+        return $explicitPath
+    }
+
+    $candidates = @()
+    $pyLauncher = Resolve-ApplicationPath -CommandName "py.exe"
+    if ($pyLauncher) {
+        $registeredOutput = @(& $pyLauncher -0p 2>$null)
+        foreach ($line in $registeredOutput) {
+            $match = [regex]::Match([string]$line, "[A-Za-z]:\\.*python(?:3)?\.exe\s*$")
+            if ($match.Success) {
+                $candidate = $match.Value.Trim()
+                if ($candidates -notcontains $candidate) {
+                    $candidates += $candidate
+                }
+            }
+        }
+    }
+
+    $localPythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
+    if (Test-Path -LiteralPath $localPythonRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $localPythonRoot -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object {
+                $candidate = Join-Path $_.FullName "python.exe"
+                if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and $candidates -notcontains $candidate) {
+                    $candidates += $candidate
+                }
+            }
+    }
+
+    foreach ($commandName in @("python.exe", "python3.exe")) {
+        $candidate = Resolve-ApplicationPath -CommandName $commandName
+        if ($candidate -and $candidates -notcontains $candidate) {
+            $candidates += $candidate
+        }
+    }
+
+    $noisyFallback = $null
+    foreach ($candidate in $candidates) {
+        $probe = Test-PythonInterpreter -Path $candidate
+        if (-not $probe.Usable) {
+            continue
+        }
+
+        if ($probe.Clean) {
+            return $candidate
+        }
+
+        if (-not $noisyFallback) {
+            $noisyFallback = $candidate
+        }
+    }
+
+    if ($noisyFallback) {
+        return $noisyFallback
+    }
+
+    throw "Python 3 with json, sqlite3, and urllib was not found. Install Python or pass -PythonExe with its full path."
 }
 
 function Get-LogFileSignaturePart {
@@ -400,11 +531,12 @@ function New-RateLimitIcon {
             $weekRemaining = Get-WindowPercentValue -Window $Snapshot.weekly
         }
 
-        $backgroundColor = if ($null -eq $fiveRemaining) {
+        $backgroundRemaining = if ($null -ne $fiveRemaining) { $fiveRemaining } else { $weekRemaining }
+        $backgroundColor = if ($null -eq $backgroundRemaining) {
             [System.Drawing.Color]::FromArgb(255, 84, 92, 108)
         }
         else {
-            Get-StatusColor -RemainingPercent $fiveRemaining
+            Get-StatusColor -RemainingPercent $backgroundRemaining
         }
 
         $textValue = if ($null -eq $weekRemaining) { "--" } else { [string]$weekRemaining }
@@ -506,6 +638,10 @@ function Get-TooltipText {
     $fiveValue = if ($null -eq $Snapshot.fiveHour.remainingPercent) { "--" } else { [string][int]$Snapshot.fiveHour.remainingPercent }
     $weekValue = if ($null -eq $Snapshot.weekly.remainingPercent) { "--" } else { [string][int]$Snapshot.weekly.remainingPercent }
     $weekReset = Format-ResetLabel -ResetAtLocal $Snapshot.weekly.resetAtLocal -ResetInSeconds $Snapshot.weekly.resetInSeconds
+    if ($fiveValue -eq "--") {
+        return "Wk ${weekValue}% | reset $weekReset"
+    }
+
     return "5h ${fiveValue}% | Wk ${weekValue}% | Wk reset $weekReset"
 }
 
@@ -529,10 +665,30 @@ function Get-SnapshotSourceLabel {
 }
 
 function Get-ReaderSnapshot {
-    $commandOutput = & $PythonExe $Script:ReaderPath --codex-root $CodexRoot 2>&1
+    if (-not $Script:State.PythonPath) {
+        try {
+            $Script:State.PythonPath = Resolve-PythonInterpreter
+        }
+        catch {
+            return [pscustomobject]@{
+                ok    = $false
+                error = $_.Exception.Message
+            }
+        }
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $commandOutput = @(& $Script:State.PythonPath -X utf8 $Script:ReaderPath --codex-root $CodexRoot 2>&1)
+        $readerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $joinedOutput = ($commandOutput -join [Environment]::NewLine).Trim()
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($readerExitCode -ne 0) {
         return [pscustomobject]@{
             ok    = $false
             error = "Reader process failed: $joinedOutput"
@@ -546,15 +702,25 @@ function Get-ReaderSnapshot {
         }
     }
 
-    try {
-        return $joinedOutput | ConvertFrom-Json
-    }
-    catch {
-        return [pscustomobject]@{
-            ok    = $false
-            error = "Failed to parse reader JSON: $($_.Exception.Message)"
-            raw   = $joinedOutput
+    $outputLines = @($commandOutput | ForEach-Object { [string]$_ })
+    for ($index = $outputLines.Count - 1; $index -ge 0; $index--) {
+        $candidateJson = $outputLines[$index].Trim()
+        if ([string]::IsNullOrWhiteSpace($candidateJson)) {
+            continue
         }
+
+        try {
+            return $candidateJson | ConvertFrom-Json
+        }
+        catch {
+            continue
+        }
+    }
+
+    return [pscustomobject]@{
+        ok    = $false
+        error = "Failed to parse reader JSON."
+        raw   = $joinedOutput
     }
 }
 
@@ -587,7 +753,10 @@ function Update-MenuText {
     $sourceLabel = Get-SnapshotSourceLabel -Snapshot $Snapshot
 
     $items.header.Text = "Codex plan: $($Snapshot.planType)"
-    $items.fiveHour.Text = "5h: $fiveRemaining left | reset $fiveReset ($fiveCountdown)"
+    $items.fiveHour.Visible = ($fiveRemaining -ne "--")
+    if ($items.fiveHour.Visible) {
+        $items.fiveHour.Text = "5h: $fiveRemaining left | reset $fiveReset ($fiveCountdown)"
+    }
     $items.weekly.Text = "Week: $weekRemaining left | reset $weekReset ($weekCountdown)"
     $items.updated.Text = "Last sync: $($Snapshot.observedAtLocal) | $sourceLabel"
 }
@@ -669,7 +838,12 @@ function Show-DetailsBalloon {
     $weekRemaining = if ($null -eq $snapshot.weekly.remainingPercent) { "--" } else { [string][int]$snapshot.weekly.remainingPercent + "%" }
     $fiveCountdown = Format-CountdownLabel -TotalSeconds $snapshot.fiveHour.resetInSeconds
     $weekCountdown = Format-CountdownLabel -TotalSeconds $snapshot.weekly.resetInSeconds
-    $message = "5h left: $fiveRemaining ($fiveCountdown)`nWeek left: $weekRemaining ($weekCountdown)"
+    $message = if ($fiveRemaining -eq "--") {
+        "Week left: $weekRemaining ($weekCountdown)"
+    }
+    else {
+        "5h left: $fiveRemaining ($fiveCountdown)`nWeek left: $weekRemaining ($weekCountdown)"
+    }
     $Script:State.NotifyIcon.ShowBalloonTip(3000, "Codex token taskbar", $message, [System.Windows.Forms.ToolTipIcon]::Info)
 }
 
@@ -828,7 +1002,9 @@ if ($RunOnce) {
     $fiveReset = Format-ResetLabel -ResetAtLocal $snapshot.fiveHour.resetAtLocal -ResetInSeconds $snapshot.fiveHour.resetInSeconds
     $weekReset = Format-ResetLabel -ResetAtLocal $snapshot.weekly.resetAtLocal -ResetInSeconds $snapshot.weekly.resetInSeconds
 
-    Write-Output "5h: $fiveRemaining left (reset $fiveReset)"
+    if ($fiveRemaining -ne "--") {
+        Write-Output "5h: $fiveRemaining left (reset $fiveReset)"
+    }
     Write-Output "Week: $weekRemaining left (reset $weekReset)"
     Write-Output "Observed: $($snapshot.observedAtLocal)"
     exit 0

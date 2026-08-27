@@ -1,6 +1,6 @@
 # Codex Token Taskbar
 
-Small Windows tray app that shows your current Codex 5-hour and weekly usage headroom in the Windows 11 notification area.
+Small Windows tray app that shows your current Codex usage headroom in the Windows 11 notification area. It supports the current weekly-only quota and the legacy 5-hour plus weekly layout.
 
 ## Why tray icon instead of a custom taskbar widget?
 
@@ -9,7 +9,7 @@ Windows 11 no longer supports the old custom deskband/taskbar-toolbar model in a
 ## What it displays
 
 - Tray icon number: weekly remaining percent
-- Tray icon background color: 5-hour remaining percent
+- Tray icon background color: 5-hour remaining percent when available, otherwise weekly remaining percent
 - Tooltip: compact summary
 - Context menu: reset times and last sync time
 
@@ -19,7 +19,7 @@ Important: the app shows remaining percentages plus reset timestamps, not absolu
 
 - Windows 11
 - PowerShell 5 or newer
-- Python 3 available on `PATH`
+- Python 3 installed normally or registered with the Windows Python Launcher (`py.exe`); `-PythonExe` can point to a specific interpreter when needed
 - Codex authentication state under `~/.codex/auth.json`
 - Local Codex logs under `~/.codex/logs_1.sqlite` only if the official request path is unavailable
 
@@ -42,7 +42,8 @@ Run:
 powershell -ExecutionPolicy Bypass -File .\app\TokenTaskbar.ps1 -RunOnce
 ```
 
-That prints the latest observed 5-hour and weekly values without starting the tray app.
+That prints the latest observed quota values without starting the tray app.
+The PowerShell launcher probes registered Python installations and ignores broken app-execution aliases, so Python does not need to be on `PATH`.
 
 ## Start automatically at sign-in
 
@@ -93,11 +94,12 @@ Note: this intentionally kills the running tray instance once as part of the tes
 ## How the app works
 
 1. `app/read_codex_rate_limits.py` first calls `https://chatgpt.com/backend-api/wham/usage` with the access token from `~/.codex/auth.json`.
-2. If that official request fails, the reader falls back to the latest `codex.rate_limits` event from `~/.codex/logs_1.sqlite`.
-3. `app/TokenTaskbar.ps1` polls that reader on a timer.
-4. When the reader is on local-log fallback, unchanged `logs_1.sqlite` and `logs_1.sqlite-wal` signatures skip the Python reader call.
-5. If the effective displayed state is unchanged, the tray app skips icon redraw and menu refresh.
-6. The tray icon is redrawn with the current 5-hour and weekly remaining percentages.
+2. The reader identifies short and weekly windows from their durations, so a weekly-only `primary_window` is not mistaken for the retired 5-hour limit.
+3. If that official request fails, the reader falls back to the latest `codex.rate_limits` event from `~/.codex/logs_1.sqlite`.
+4. `app/TokenTaskbar.ps1` polls that reader on a timer.
+5. When the reader is on local-log fallback, unchanged `logs_1.sqlite` and `logs_1.sqlite-wal` signatures skip the Python reader call.
+6. If the effective displayed state is unchanged, the tray app skips icon redraw and menu refresh.
+7. The tray icon is redrawn with the current weekly remaining percentage and colors itself from the shortest available quota window.
 
 ## Resource forecast
 

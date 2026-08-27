@@ -12,6 +12,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+WEEKLY_WINDOW_MINUTES_MIN = 6 * 24 * 60
+SHORT_WINDOW_MINUTES_MAX = 24 * 60
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +56,59 @@ def normalize_int(value: Any) -> int | None:
         return None
 
 
+def get_window_minutes(raw: dict[str, Any] | None) -> int | None:
+    if not raw:
+        return None
+
+    window_minutes = normalize_int(raw.get("window_minutes"))
+    if window_minutes is not None:
+        return window_minutes
+
+    limit_window_seconds = normalize_int(raw.get("limit_window_seconds"))
+    if limit_window_seconds is None:
+        return None
+    return max(1, limit_window_seconds // 60)
+
+
+def classify_rate_limit_windows(
+    primary: dict[str, Any] | None,
+    secondary: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return (short_window, weekly_window) across old and new Codex layouts."""
+    candidates = [window for window in (primary, secondary) if window]
+    short_window = None
+    weekly_window = None
+
+    for window in candidates:
+        window_minutes = get_window_minutes(window)
+        if window_minutes is None:
+            continue
+        if window_minutes >= WEEKLY_WINDOW_MINUTES_MIN and weekly_window is None:
+            weekly_window = window
+        elif window_minutes <= SHORT_WINDOW_MINUTES_MAX and short_window is None:
+            short_window = window
+
+    # Preserve the legacy primary/secondary convention when duration metadata is
+    # absent, but treat a single unclassified window as the current weekly quota.
+    if len(candidates) == 1:
+        only_window = candidates[0]
+        if short_window is None and weekly_window is None:
+            weekly_window = only_window
+    else:
+        if short_window is None:
+            short_window = next(
+                (window for window in candidates if window is not weekly_window),
+                None,
+            )
+        if weekly_window is None:
+            weekly_window = next(
+                (window for window in reversed(candidates) if window is not short_window),
+                None,
+            )
+
+    return short_window, weekly_window
+
+
 def serialize_window(name: str, raw: dict[str, Any] | None, now_ts: int) -> dict[str, Any]:
     raw = raw or {}
     used_percent = normalize_percent(raw.get("used_percent"))
@@ -63,11 +118,7 @@ def serialize_window(name: str, raw: dict[str, Any] | None, now_ts: int) -> dict
     if reset_at is None and reset_after_seconds is not None:
         reset_at = now_ts + max(0, reset_after_seconds)
 
-    window_minutes = normalize_int(raw.get("window_minutes"))
-    if window_minutes is None:
-        limit_window_seconds = normalize_int(raw.get("limit_window_seconds"))
-        if limit_window_seconds is not None:
-            window_minutes = max(1, limit_window_seconds // 60)
+    window_minutes = get_window_minutes(raw)
 
     reset_in_seconds = None
     if reset_at is not None:
@@ -143,6 +194,10 @@ def query_wham_usage(codex_root: Path) -> dict[str, Any]:
         raise RuntimeError(f"Missing rate_limit payload from {WHAM_USAGE_URL}")
 
     now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    short_window, weekly_window = classify_rate_limit_windows(
+        rate_limit.get("primary_window"),
+        rate_limit.get("secondary_window"),
+    )
 
     return {
         "ok": True,
@@ -154,8 +209,8 @@ def query_wham_usage(codex_root: Path) -> dict[str, Any]:
         "observedAt": now_ts,
         "observedAtLocal": iso_local(now_ts),
         "ageSeconds": 0,
-        "fiveHour": serialize_window("fiveHour", rate_limit.get("primary_window"), now_ts),
-        "weekly": serialize_window("weekly", rate_limit.get("secondary_window"), now_ts),
+        "fiveHour": serialize_window("fiveHour", short_window, now_ts),
+        "weekly": serialize_window("weekly", weekly_window, now_ts),
     }
 
 
@@ -182,6 +237,10 @@ def query_latest_snapshot(db_path: Path) -> dict[str, Any]:
     payload = extract_payload(row[1])
     rate_limits = payload.get("rate_limits") or {}
     now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    short_window, weekly_window = classify_rate_limit_windows(
+        rate_limits.get("primary"),
+        rate_limits.get("secondary"),
+    )
 
     return {
         "ok": True,
@@ -193,8 +252,8 @@ def query_latest_snapshot(db_path: Path) -> dict[str, Any]:
         "observedAt": observed_ts,
         "observedAtLocal": iso_local(observed_ts),
         "ageSeconds": max(0, now_ts - observed_ts),
-        "fiveHour": serialize_window("fiveHour", rate_limits.get("primary"), now_ts),
-        "weekly": serialize_window("weekly", rate_limits.get("secondary"), now_ts),
+        "fiveHour": serialize_window("fiveHour", short_window, now_ts),
+        "weekly": serialize_window("weekly", weekly_window, now_ts),
     }
 
 
