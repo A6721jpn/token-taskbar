@@ -21,3 +21,7 @@ __pycache__/
 .vscode/
 Desktop.ini
 Thumbs.db
+
+# Distribution build output and downloaded tools
+.build/
+dist/

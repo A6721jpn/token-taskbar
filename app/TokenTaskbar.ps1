@@ -110,6 +110,15 @@ function Resolve-PythonInterpreter {
         return $explicitPath
     }
 
+    $bundledPython = Join-Path $Script:AppRoot "runtime\python.exe"
+    if (Test-Path -LiteralPath $bundledPython -PathType Leaf) {
+        $probe = Test-PythonInterpreter -Path $bundledPython
+        if (-not $probe.Usable) {
+            throw "Bundled Python runtime is damaged. Reinstall TokenTaskbar."
+        }
+        return $bundledPython
+    }
+
     $candidates = @()
     $pyLauncher = Resolve-ApplicationPath -CommandName "py.exe"
     if ($pyLauncher) {
@@ -199,6 +208,13 @@ function Update-CachedSnapshotTiming {
         return $Snapshot
     }
 
+    # Reader failures intentionally return an error-only snapshot without
+    # fiveHour/weekly windows. Do not apply timing updates to that shape.
+    $okProperty = $Snapshot.PSObject.Properties["ok"]
+    if (-not $okProperty -or $okProperty.Value -ne $true) {
+        return $Snapshot
+    }
+
     $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
     $observedAtProperty = $Snapshot.PSObject.Properties["observedAt"]
@@ -207,7 +223,12 @@ function Update-CachedSnapshotTiming {
     }
 
     foreach ($windowName in @("fiveHour", "weekly")) {
-        $window = $Snapshot.$windowName
+        $windowProperty = $Snapshot.PSObject.Properties[$windowName]
+        if (-not $windowProperty) {
+            continue
+        }
+
+        $window = $windowProperty.Value
         if (-not $window) {
             continue
         }

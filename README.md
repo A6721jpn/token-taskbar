@@ -2,6 +2,29 @@
 
 Small Windows tray app that shows your current Codex usage headroom in the Windows 11 notification area. It supports the current weekly-only quota and the legacy 5-hour plus weekly layout.
 
+## Windows 11 installer
+
+Download **TokenTaskbar-1.1.0-win-x64-setup.exe** from [GitHub Releases](https://github.com/A6721jpn/token-taskbar/releases/latest) and run it. Python is bundled; no administrator privileges or separate Python installation are required. Sign in to Codex on the same Windows account before launching TokenTaskbar.
+
+- Supports Windows 11 x64. ARM64 native builds are not provided or tested.
+- Installs to `%LOCALAPPDATA%\Programs\TokenTaskbar`.
+- Adds a Start menu entry and an optional sign-in startup shortcut.
+- Exit the tray app before upgrading or uninstalling. Uninstall through Windows Settings > Apps > Installed apps; Codex credentials and logs are preserved.
+- The installer is currently unsigned, so Windows SmartScreen may display a warning. `SHA256SUMS.txt` is provided with each release.
+- Existing source-checkout users should run `uninstall-startup.ps1` from their old checkout and exit the old tray instance before switching to the packaged version, to avoid duplicate startup entries.
+
+The packaged startup shortcut starts at sign-in; the delayed Task Scheduler and recovery setup described below applies only to source installations.
+
+## Build the installer
+
+Install [Inno Setup](https://jrsoftware.org/isinfo.php), then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\build.ps1
+```
+
+The build downloads the official CPython 3.14.7 x64 embeddable runtime, verifies its pinned SHA-256 checksum, and includes its license. Outputs are written to `dist/`. Only the explicitly listed application files and runtime are packaged; local Codex credentials and logs are not included.
+
 ## Why tray icon instead of a custom taskbar widget?
 
 Windows 11 no longer supports the old custom deskband/taskbar-toolbar model in a practical way for apps like this. The app therefore uses a pinned tray icon in the taskbar notification area, which is the most reliable always-on display surface on Windows 11.
@@ -15,7 +38,7 @@ Windows 11 no longer supports the old custom deskband/taskbar-toolbar model in a
 
 Important: the app shows remaining percentages plus reset timestamps, not absolute token totals.
 
-## Requirements
+## Requirements (running from source)
 
 - Windows 11
 - PowerShell 5 or newer
